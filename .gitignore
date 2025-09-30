@@ -1,0 +1,5 @@
+# Virtual Environment
+.venv/
+
+# Offline packages
+offline_packages_updated/
