@@ -98,6 +98,16 @@ class FastAPIUAEPlateAnalyzer:
             'fujairah': 'Fujairah',
             'umm al quwain': 'Umm Al Quwain'
         }
+
+        self.emirate_to_code ={
+            'Abu Dhabi': 'AUH',
+            'Dubai': 'DXB',
+            'Sharjah': 'SHJ',
+            'Ajman': 'AJM',
+            'Fujairah': 'FUJ',
+            'Ras Al Khaimah': 'RAK',
+            'Umm Al Quwain': 'UAQ'
+        }
         
         # Valid categories for each emirate
         self.valid_categories = {
@@ -298,18 +308,19 @@ Timestamp: {time.time()}
                             if json_match:
                                 try:
                                     parsed_result = json.loads(json_match.group())
-                                    
-                                    # Normalize response to expected format
+
+                                    emirate_full_name = parsed_result.get("state", "")
+                                    state_code = self.map_emirate_to_code(emirate_full_name)
                                     normalized_result = {
                                         "category": parsed_result.get("category", ""),
-                                        "state": parsed_result.get("state", ""),
+                                        "state": state_code,
                                         "number": parsed_result.get("number", ""),
                                         "confidence": parsed_result.get("confidence", 0.95),
                                         "plate_color": parsed_result.get("plate_color", "white").lower(),
                                         "method": "ollama_qwen2.5vl_async",
                                         "vehicle_type": self.get_vehicle_type(parsed_result.get("plate_color", "white").lower())
                                     }
-                                    
+                                                                                                            
                                     # Generate full_text if we have components
                                     if normalized_result["category"] and normalized_result["state"] and normalized_result["number"]:
                                         normalized_result["full_text"] = self.generate_full_text(
@@ -438,6 +449,7 @@ Timestamp: {time.time()}
 
     def generate_full_text(self, category: str, state: str, number: str) -> str:
         """Generate full text programmatically in consistent format"""
+        # State is now a 3-letter code like 'AUH', 'DXB', etc.
         return f"{category} {state} {number}"
 
     def get_vehicle_type(self, plate_color: str) -> str:
@@ -759,12 +771,15 @@ Timestamp: {time.time()}
             if category and number:
                 plate_color, color_confidence = self.detect_plate_color(image)
                 vehicle_type = self.get_vehicle_type(plate_color)
-                full_text = self.generate_full_text(category, state, number)
+                # full_text = self.generate_full_text(category, state, number)
                 confidence = sum(d['confidence'] for d in processed_detections) / len(processed_detections)
-                
+
+                state_code = self.map_emirate_to_code(state)
+                full_text = self.generate_full_text(category, state_code, number)
+
                 return {
                     "category": category,
-                    "state": state,
+                    "state": state_code,
                     "number": number,
                     "full_text": full_text,
                     "confidence": confidence,
@@ -845,6 +860,23 @@ Timestamp: {time.time()}
                 logger.debug(f"Split '{text}' into category '{letter}' and number '{numbers}'")
                 return [letter, numbers]
         return [text]
+    
+    def map_emirate_to_code(self, emirate_name: str) -> str:
+        """
+        Convert full emirate name to 3-letter code.
+        Returns 'Unknown' if emirate is not recognized.
+        
+        Args:
+            emirate_name: Full name of emirate (e.g., 'Abu Dhabi', 'Dubai')
+        
+        Returns:
+            3-letter code (e.g., 'AUH', 'DXB') or 'Unknown'
+        """
+        if not emirate_name or emirate_name == "Unknown" or emirate_name == "unknown":
+            return "Unknown"
+        
+        # Get the code from mapping, default to 'Unknown' if not found
+        return self.emirate_to_code.get(emirate_name, "Unknown")
 
 # Initialize the FastAPI analyzer
 analyzer = FastAPIUAEPlateAnalyzer(

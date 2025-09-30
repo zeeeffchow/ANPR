@@ -1,5 +1,31 @@
-# Virtual Environment
-.venv/
-
 # Offline packages
 offline_packages_updated/
+
+# Python
+pycache/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (if they're large)
+models/
+*.pth
+*.onnx
+*.pkl
