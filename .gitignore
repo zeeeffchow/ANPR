@@ -1,12 +1,19 @@
 # Offline packages
 offline_packages_updated/
 
+# requirements folder
+requirements/
+
+# dependency analyzer script
+dependency_analyzer.py
+
 # Python
 pycache/
 *.py[cod]
 *$py.class
 *.so
 .Python
+.python-version
 
 # Virtual environments
 .venv/
