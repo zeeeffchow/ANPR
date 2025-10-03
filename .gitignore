@@ -12,7 +12,6 @@ output/
 decoded_images/
 reference/
 
-
 # Python
 pycache/
 *.py[cod]
@@ -26,6 +25,7 @@ pycache/
 venv/
 env/
 ENV/
+test-venv/
 
 # IDE
 .vscode/
