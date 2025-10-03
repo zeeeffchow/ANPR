@@ -7,6 +7,11 @@ requirements/
 # dependency analyzer script
 dependency_analyzer.py
 
+# output and decoded_images
+output/
+decoded_images/
+reference/
+
 # Python
 pycache/
 *.py[cod]
@@ -21,6 +26,7 @@ venv/
 env/
 ENV/
 new_venv/
+test-venv/
 
 # IDE
 .vscode/
