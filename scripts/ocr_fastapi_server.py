@@ -73,16 +73,24 @@ class HealthResponse(BaseModel):
     timestamp: float
 
 class FastAPIUAEPlateAnalyzer:
-    def __init__(self, model_path: str = "/models", ollama_url: str = "http://localhost:11434"):
+    # def __init__(self, model_path: str = "C:/Users/User/.paddlex", ollama_url: str = "http://localhost:11434"):
+    def __init__(self, ollama_url: str = "http://localhost:11434"):
         """Initialize with async-friendly PaddleOCR models and Ollama for Qwen2.5-VL"""
-        self.model_path = model_path
+
+        PADDLEOCR_HOME = "C:/Users/User/.paddlex"
+        os.environ['PADDLEOCR_HOME'] = PADDLEOCR_HOME
+        os.environ['HUB_HOME'] = PADDLEOCR_HOME
+
+        # self.model_path = model_path
         self.ollama_url = ollama_url
         self.ollama_model = "qwen2.5vl:7b"
         self.ocr_model_en = None
         self.ocr_model_ar = None
         
+        # print("loading ocr models")
         # Initialize models in a thread-safe way
         self._load_ocr_models()
+        # print("ocr_models loaded")
         self._check_ollama_connection()
         
         # Emirates mapping for normalization
@@ -190,30 +198,45 @@ CRITICAL: Extract real values from the image, not placeholder examples.
             logger.warning(f"Model warm-up failed: {e}")
 
     def _load_ocr_models(self):
-        """Load PaddleOCR models with optimized settings for FastAPI"""
+        """Load PaddleOCR models using config files for offline operation"""
         try:
             from paddleocr import PaddleOCR
+            import os
             
-            # Load English model with CPU optimization
-            self.ocr_model_en = PaddleOCR(
-                use_textline_orientation=True,
-                lang='en',
-                enable_mkldnn=True,  # Safe to use with FastAPI's event loop
-                cpu_threads=4  # Optimize for FastAPI async handling
-            )
+            # Get the directory where this script is located
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # Paths to config files (should be in same directory as this script)
+            en_config_path = os.path.join(script_dir, "ocr_en_config.yaml")
+            ar_config_path = os.path.join(script_dir, "ocr_ar_config.yaml")
+            
+            # Check if config files exist
+            if not os.path.exists(en_config_path):
+                raise FileNotFoundError(f"English config not found: {en_config_path}")
+            if not os.path.exists(ar_config_path):
+                raise FileNotFoundError(f"Arabic config not found: {ar_config_path}")
+            
+            logger.info(f"Loading English OCR model from config: {en_config_path}")
+            
+            # Load English model from config file
+            self.ocr_model_en = PaddleOCR(paddlex_config=en_config_path)
             logger.info("PaddleOCR English model loaded successfully")
             
-            # Load Arabic model
-            self.ocr_model_ar = PaddleOCR(
-                use_textline_orientation=True,
-                lang='ar',
-                enable_mkldnn=True,
-                cpu_threads=4
-            )
+            logger.info(f"Loading Arabic OCR model from config: {ar_config_path}")
+            
+            # Load Arabic model from config file
+            self.ocr_model_ar = PaddleOCR(paddlex_config=ar_config_path)
             logger.info("PaddleOCR Arabic model loaded successfully")
             
+        except FileNotFoundError as e:
+            logger.error(f"Config file missing: {e}")
+            logger.error("Make sure ocr_en_config.yaml and ocr_ar_config.yaml are in the same directory")
+            self.ocr_model_en = None
+            self.ocr_model_ar = None
         except Exception as e:
             logger.error(f"Failed to load OCR models: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.ocr_model_en = None
             self.ocr_model_ar = None
 
@@ -880,7 +903,8 @@ Timestamp: {time.time()}
 
 # Initialize the FastAPI analyzer
 analyzer = FastAPIUAEPlateAnalyzer(
-    model_path=os.getenv("MODEL_PATH", "/models"),
+    # model_path=os.getenv("MODEL_PATH", "/models"),
+    # model_path="C:/Users/User/.paddlex",
     ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434")
 )
 
@@ -934,11 +958,11 @@ async def model_info():
     return {
         "paddleocr_english": {
             "loaded": analyzer.ocr_model_en is not None,
-            "model_path": analyzer.model_path
+            # "model_path": analyzer.model_path
         },
         "paddleocr_arabic": {
             "loaded": analyzer.ocr_model_ar is not None,
-            "model_path": analyzer.model_path
+            # "model_path": analyzer.model_path
         },
         "ollama": {
             "available": analyzer.ollama_available,
@@ -996,7 +1020,7 @@ if __name__ == '__main__':
     workers = int(os.getenv('WORKERS', 1))
     
     logger.info(f"Starting FastAPI OCR Server on {host}:{port}")
-    logger.info(f"PaddleOCR model path: {analyzer.model_path}")
+    # logger.info(f"PaddleOCR model path: {analyzer.model_path}")
     logger.info(f"Ollama URL: {analyzer.ollama_url}")
     logger.info(f"Ollama model: {analyzer.ollama_model}")
     

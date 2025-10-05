@@ -27,6 +27,11 @@ env/
 ENV/
 new_venv/
 test-venv/
+newestvenv/
+paddleocr2_env/
+
+# discard folder
+/discard
 
 # IDE
 .vscode/
