@@ -19,11 +19,25 @@ import traceback
 import requests
 import asyncio
 from functools import lru_cache
+from collections import deque
+import aiohttp
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+
+_ocr_en_lock = None
+_ocr_ar_lock = None
+
+def get_ocr_locks():
+    """Get or create OCR locks"""
+    global _ocr_en_lock, _ocr_ar_lock
+    if _ocr_en_lock is None:
+        _ocr_en_lock = asyncio.Lock()
+    if _ocr_ar_lock is None:
+        _ocr_ar_lock = asyncio.Lock()
+    return _ocr_en_lock, _ocr_ar_lock
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -73,7 +87,6 @@ class HealthResponse(BaseModel):
     timestamp: float
 
 class FastAPIUAEPlateAnalyzer:
-    # def __init__(self, model_path: str = "C:/Users/User/.paddlex", ollama_url: str = "http://localhost:11434"):
     def __init__(self, ollama_url: str = "http://localhost:11434"):
         """Initialize with async-friendly PaddleOCR models and Ollama for Qwen2.5-VL"""
 
@@ -84,13 +97,38 @@ class FastAPIUAEPlateAnalyzer:
         # self.model_path = model_path
         self.ollama_url = ollama_url
         self.ollama_model = "qwen2.5vl:7b"
-        self.ocr_model_en = None
-        self.ocr_model_ar = None
+        # self.ocr_model_en = None
+        # self.ocr_model_ar = None
+
+        # self.ocr_en_lock = asyncio.Lock()
+        # self.ocr_ar_lock = asyncio.Lock()
+
+        # from concurrent.futures import ThreadPoolExecutor
+        # self.ocr_en_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr_en")
+        # self.ocr_ar_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr_ar")
+
+        # self.ocr_en_lock, self.ocr_ar_lock = get_ocr_locks()
+
+        # OCR service URL
+        self.ocr_service_url = os.getenv("OCR_SERVICE_URL", "http://localhost:8081")
+
+        # Semaphore for Ollama rate limiting (max 2 concurrent)
+        self.ollama_semaphore = asyncio.Semaphore(2)
+
+        # Request queue (max 5 waiting)
+        self.request_queue = asyncio.Queue(maxsize=5)
+
+        # Queue statistics
+        self.queue_stats = {
+            'total_processed': 0,
+            'total_rejected': 0,
+            'wait_times': [],
+            'current_processing': 0
+        }
+        self.stats_lock = asyncio.Lock()
         
-        # print("loading ocr models")
         # Initialize models in a thread-safe way
-        self._load_ocr_models()
-        # print("ocr_models loaded")
+        # self._load_ocr_models()
         self._check_ollama_connection()
         
         # Emirates mapping for normalization
@@ -174,7 +212,7 @@ You MUST not return any Arabic text in the final JSON. Always convert it to Engl
 
 CRITICAL: Extract real values from the image, not placeholder examples.
 """
-        self._warm_up_models()
+        # self._warm_up_models()
 
     def _warm_up_models(self):
         """Pre-warm OCR models to avoid first-request delays"""
@@ -266,8 +304,9 @@ CRITICAL: Extract real values from the image, not placeholder examples.
         """Async call to Ollama with Qwen2.5-VL for license plate analysis"""
         if not self.ollama_available:
             return {"error": "Ollama service not available"}
-            
-        user_prompt = f"""
+        
+        async with self.ollama_semaphore:
+            user_prompt = f"""
 Analyze this image of a cropped license plate from scratch. Do NOT make any assumptions about which emirate it belongs to.
 
 Pay special attention to:
@@ -291,90 +330,88 @@ Extract exactly what you see in this specific image - do not default to "Dubai" 
 Provide your final JSON in the exact format that we have specified earlier.
 
 Timestamp: {time.time()}
-"""
-            
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Ollama Qwen2.5-VL async attempt {attempt + 1}/{max_retries}")
+    """
                 
-                payload = {
-                    "model": self.ollama_model,
-                    "prompt": self.qwen_system_prompt + "\n\n" + user_prompt,
-                    "images": [image_base64],
-                    "stream": False,
-                    "options": {
-                        "temperature": 0,
-                        "top_p": 0.9
-                    }
-                }
-                
-                # Use asyncio to make HTTP request non-blocking
-                import aiohttp
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.ollama_url}/api/generate",
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=120)
-                    ) as response:
-                        
-                        logger.info(f"Ollama response status: {response.status}")
-                        
-                        if response.status == 200:
-                            result = await response.json()
-                            generated_text = result.get("response", "")
-                            
-                            logger.info(f"Ollama generated text: {generated_text[:200]}...")
-                            
-                            # Parse JSON from response
-                            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', generated_text, re.DOTALL)
-                            if json_match:
-                                try:
-                                    parsed_result = json.loads(json_match.group())
-
-                                    emirate_full_name = parsed_result.get("state", "")
-                                    state_code = self.map_emirate_to_code(emirate_full_name)
-                                    normalized_result = {
-                                        "category": parsed_result.get("category", ""),
-                                        "state": state_code,
-                                        "number": parsed_result.get("number", ""),
-                                        "confidence": parsed_result.get("confidence", 0.95),
-                                        "plate_color": parsed_result.get("plate_color", "white").lower(),
-                                        "method": "ollama_qwen2.5vl_async",
-                                        "vehicle_type": self.get_vehicle_type(parsed_result.get("plate_color", "white").lower())
-                                    }
-                                                                                                            
-                                    # Generate full_text if we have components
-                                    if normalized_result["category"] and normalized_result["state"] and normalized_result["number"]:
-                                        normalized_result["full_text"] = self.generate_full_text(
-                                            normalized_result["category"], normalized_result["state"], normalized_result["number"]
-                                        )
-                                    
-                                    return normalized_result
-                                    
-                                except json.JSONDecodeError as e:
-                                    logger.error(f"JSON decode error: {e}")
-                                    return {"error": f"Invalid JSON in Ollama response: {e}", "raw_response": generated_text}
-                            else:
-                                logger.error("No JSON found in Ollama response")
-                                return {"error": "No JSON found in Ollama response", "raw_response": generated_text}
-                        
-                        else:
-                            error_text = await response.text()
-                            logger.error(f"Ollama request failed: {response.status} - {error_text[:500]}")
-                            return {"error": f"Ollama request failed: {response.status} - {error_text[:500]}"}
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Ollama Qwen2.5-VL async attempt {attempt + 1}/{max_retries}")
                     
-            except asyncio.TimeoutError:
-                logger.warning(f"Ollama timeout on attempt {attempt + 1}/{max_retries}")
-                if attempt == max_retries - 1:
-                    return {"error": "Ollama timeout after multiple attempts"}
-                await asyncio.sleep(5)  # Non-blocking sleep
-                continue
-            except Exception as e:
-                logger.error(f"Ollama call exception: {e}")
-                return {"error": str(e)}
-        
-        return {"error": "Max retries exceeded"}
+                    payload = {
+                        "model": self.ollama_model,
+                        "prompt": self.qwen_system_prompt + "\n\n" + user_prompt,
+                        "images": [image_base64],
+                        "stream": False,
+                        "options": {
+                            "temperature": 0,
+                            "top_p": 0.9
+                        }
+                    }
+                    
+                    # Use asyncio to make HTTP request non-blocking                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            f"{self.ollama_url}/api/generate",
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=120)
+                        ) as response:
+                            
+                            logger.info(f"Ollama response status: {response.status}")
+                            
+                            if response.status == 200:
+                                result = await response.json()
+                                generated_text = result.get("response", "")
+                                
+                                logger.info(f"Ollama generated text: {generated_text[:200]}...")
+                                
+                                # Parse JSON from response
+                                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', generated_text, re.DOTALL)
+                                if json_match:
+                                    try:
+                                        parsed_result = json.loads(json_match.group())
+
+                                        emirate_full_name = parsed_result.get("state", "")
+                                        state_code = self.map_emirate_to_code(emirate_full_name)
+                                        normalized_result = {
+                                            "category": parsed_result.get("category", ""),
+                                            "state": state_code,
+                                            "number": parsed_result.get("number", ""),
+                                            "confidence": parsed_result.get("confidence", 0.95),
+                                            "plate_color": parsed_result.get("plate_color", "white").lower(),
+                                            "method": "ollama_qwen2.5vl_async",
+                                            "vehicle_type": self.get_vehicle_type(parsed_result.get("plate_color", "white").lower())
+                                        }
+                                                                                                                
+                                        # Generate full_text if we have components
+                                        if normalized_result["category"] and normalized_result["state"] and normalized_result["number"]:
+                                            normalized_result["full_text"] = self.generate_full_text(
+                                                normalized_result["category"], normalized_result["state"], normalized_result["number"]
+                                            )
+                                        
+                                        return normalized_result
+                                        
+                                    except json.JSONDecodeError as e:
+                                        logger.error(f"JSON decode error: {e}")
+                                        return {"error": f"Invalid JSON in Ollama response: {e}", "raw_response": generated_text}
+                                else:
+                                    logger.error("No JSON found in Ollama response")
+                                    return {"error": "No JSON found in Ollama response", "raw_response": generated_text}
+                            
+                            else:
+                                error_text = await response.text()
+                                logger.error(f"Ollama request failed: {response.status} - {error_text[:500]}")
+                                return {"error": f"Ollama request failed: {response.status} - {error_text[:500]}"}
+                        
+                except asyncio.TimeoutError:
+                    logger.warning(f"Ollama timeout on attempt {attempt + 1}/{max_retries}")
+                    if attempt == max_retries - 1:
+                        return {"error": "Ollama timeout after multiple attempts"}
+                    await asyncio.sleep(5)  # Non-blocking sleep
+                    continue
+                except Exception as e:
+                    logger.error(f"Ollama call exception: {e}")
+                    return {"error": str(e)}
+            
+            return {"error": "Max retries exceeded"}
 
     def detect_plate_color(self, image: np.ndarray) -> Tuple[str, float]:
         """Detect plate background color using computer vision with confidence scoring"""
@@ -480,38 +517,70 @@ Timestamp: {time.time()}
         return self.vehicle_type_mapping.get(plate_color, 'Unknown Vehicle Type')
 
     async def detect_emirate_async(self, image: np.ndarray) -> Tuple[str, float]:
-        """Async emirate detection using PaddleOCR models"""
-        try:
-            logger.info(f"Starting async emirate detection")
+        # """Async emirate detection using PaddleOCR models"""
+        # try:
+        #     logger.info(f"Starting async emirate detection")
             
-            # Try English model only
-            emirate_en, conf_en = "unknown", 0.0
-            if self.ocr_model_en is not None:
-                try:
-                    logger.info(f"Running English OCR predict async...")
+        #     # Try English model only
+        #     emirate_en, conf_en = "unknown", 0.0
+        #     if self.ocr_model_en is not None:
+        #         try:
+        #             logger.info(f"Running English OCR predict async...")
                     
-                    # Run OCR in thread pool to avoid blocking the event loop
-                    loop = asyncio.get_event_loop()
-                    ocr_results_en = await loop.run_in_executor(
-                        None, self.ocr_model_en.predict, image
-                    )
+        #             # Run OCR in thread pool to avoid blocking the event loop
+        #             loop = asyncio.get_event_loop()
+        #             ocr_results_en = await loop.run_in_executor(
+        #                 None, self.ocr_model_en.predict, image
+        #             )
                     
-                    logger.info(f"English OCR predict completed")
-                    emirate_en, conf_en = self.parse_emirate_results(ocr_results_en, "en")
-                    logger.info(f"English OCR detected: {emirate_en} (conf: {conf_en:.2f})")
-                except Exception as e:
-                    logger.error(f"English OCR failed: {e}")
+        #             logger.info(f"English OCR predict completed")
+        #             emirate_en, conf_en = self.parse_emirate_results(ocr_results_en, "en")
+        #             logger.info(f"English OCR detected: {emirate_en} (conf: {conf_en:.2f})")
+        #         except Exception as e:
+        #             logger.error(f"English OCR failed: {e}")
             
-            # Return English result if found, otherwise unknown
-            if emirate_en != "unknown" and conf_en > 0.6:
-                logger.info(f"Using English OCR result: {emirate_en}")
-                return emirate_en, conf_en
-            else:
-                logger.info("English OCR failed to detect emirate")
-                return "unknown", 0.0
+        #     # Return English result if found, otherwise unknown
+        #     if emirate_en != "unknown" and conf_en > 0.6:
+        #         logger.info(f"Using English OCR result: {emirate_en}")
+        #         return emirate_en, conf_en
+        #     else:
+        #         logger.info("English OCR failed to detect emirate")
+        #         return "unknown", 0.0
                 
+        # except Exception as e:
+        #     logger.error(f"Async emirate detection failed: {e}")
+        #     return "unknown", 0.0
+        """Async emirate detection using external OCR service"""
+        try:
+            logger.info("Starting emirate detection via OCR service")
+            
+            # Encode image
+            _, buffer = cv2.imencode('.jpg', image)
+            img_base64 = base64.b64encode(buffer).decode()
+            
+            # Call external OCR service (English only for emirate detection)
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.ocr_service_url}/ocr",
+                    json={"image_base64": img_base64, "lang": "en"},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"OCR service error: {resp.status}")
+                        return "unknown", 0.0
+                    
+                    ocr_data = await resp.json()
+                    ocr_results = ocr_data['result']
+            
+            # Parse emirate from results
+            emirate, conf = self.parse_emirate_results(ocr_results, "en")
+            logger.info(f"Emirate detected: {emirate} (conf: {conf:.2f})")
+            
+            return emirate, conf
+            
         except Exception as e:
-            logger.error(f"Async emirate detection failed: {e}")
+            logger.error(f"Emirate detection failed: {e}")
             return "unknown", 0.0
 
     def parse_emirate_results(self, ocr_results, lang: str) -> Tuple[str, float]:
@@ -519,31 +588,25 @@ Timestamp: {time.time()}
         try:
             if not ocr_results or not ocr_results[0]:
                 return "unknown", 0.0
-                
-            # Handle predict() result format
-            if isinstance(ocr_results[0], dict) and 'rec_texts' in ocr_results[0]:
-                texts = ocr_results[0]['rec_texts']
-                scores = ocr_results[0]['rec_scores']
-                all_text = [(text.lower().strip(), score) for text, score in zip(texts, scores)]
-            else:
-                # Handle standard format
-                all_text = []
-                for line in ocr_results[0]:
-                    if len(line) >= 2:
-                        text_info = line[1]
-                        if isinstance(text_info, tuple):
-                            text, confidence = text_info
-                        else:
-                            text = text_info
-                            confidence = 0.8
-                        all_text.append((text.lower().strip(), confidence))
             
-            # Check for emirate indicators based on language
+            # OCR service returns format: [[bbox, (text, score)], ...]
+            all_text = []
+            for line in ocr_results[0]:
+                if len(line) >= 2:
+                    bbox = line[0]
+                    text_info = line[1]
+                    
+                    if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                        text, confidence = text_info[0], text_info[1]
+                        all_text.append((str(text).lower().strip(), float(confidence)))
+                    elif isinstance(text_info, str):
+                        all_text.append((text_info.lower().strip(), 0.8))
+            
+            # Check for emirate indicators
             emirate_scores = {}
             
             for text, conf in all_text:
                 if lang == 'en':
-                    # English emirate detection
                     if any(indicator in text for indicator in ['abu dhabi', 'a.d', 'abu', 'dhabi']):
                         emirate_scores['Abu Dhabi'] = max(emirate_scores.get('Abu Dhabi', 0), conf)
                     elif 'dubai' in text:
@@ -564,9 +627,54 @@ Timestamp: {time.time()}
         
         except Exception as e:
             logger.error(f"Error parsing {lang} emirate results: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return "unknown", 0.0
 
     async def analyze_plate_from_base64_async(self, base64_data: str) -> Dict:
+        """Main analysis with queue management"""
+        queue_id = f"req_{int(time.time() * 1000)}"
+        enqueue_time = time.time()
+        
+        try:
+            # Try to add to queue (timeout 5 seconds)
+            try:
+                await asyncio.wait_for(
+                    self.request_queue.put((queue_id, base64_data, enqueue_time)),
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                async with self.stats_lock:
+                    self.queue_stats['total_rejected'] += 1
+                return {"error": "Server is busy. Request queue is full."}
+            
+            # Process from queue
+            queued_id, queued_data, queued_time = await self.request_queue.get()
+            
+            try:
+                async with self.stats_lock:
+                    self.queue_stats['current_processing'] += 1
+                    wait_time = time.time() - queued_time
+                    self.queue_stats['wait_times'].append(wait_time)
+                    if len(self.queue_stats['wait_times']) > 100:
+                        self.queue_stats['wait_times'].pop(0)
+                
+                # Call your existing processing logic
+                result = await self._process_plate(queued_data)
+                
+                async with self.stats_lock:
+                    self.queue_stats['total_processed'] += 1
+                    self.queue_stats['current_processing'] -= 1
+                
+                return result
+            finally:
+                self.request_queue.task_done()
+                
+        except Exception as e:
+            logger.error(f"Queue error: {e}")
+            return {"error": str(e)}
+        
+    async def _process_plate(self, base64_data: str):
         """Async analyze plate from base64 string using hybrid approach"""
         try:
             # Decode base64 to image
@@ -642,27 +750,28 @@ Timestamp: {time.time()}
             return {"error": str(e), "traceback": traceback.format_exc()}
 
     async def extract_with_traditional_ocr_async(self, image: np.ndarray, emirate: str = None) -> Dict:
-        """Async traditional OCR extraction using pre-loaded models"""
+        """Call external OCR service"""
         try:
-            def run_with_preloaded_models(img, emirate_name):
-                """Use pre-loaded OCR models instead of creating fresh instances"""
-                # Choose model based on emirate
-                if emirate_name in ['Fujairah', 'Umm Al Quwain'] and self.ocr_model_ar:
-                    model = self.ocr_model_ar
-                    logger.debug(f"Using pre-loaded Arabic OCR model for {emirate_name}")
-                elif self.ocr_model_en:
-                    model = self.ocr_model_en
-                    logger.debug(f"Using pre-loaded English OCR model for {emirate_name or 'Unknown emirate'}")
-                else:
-                    raise Exception("No OCR model available")
-                
-                # Run prediction with pre-loaded model
-                return model.predict(img)
+            lang = "ar" if emirate in ['Fujairah', 'Umm Al Quwain'] else "en"
             
-            # Run OCR with pre-loaded models in thread pool
-            loop = asyncio.get_event_loop()
-            ocr_results = await loop.run_in_executor(None, run_with_preloaded_models, image, emirate)
-
+            # Encode image to base64
+            _, buffer = cv2.imencode('.jpg', image)
+            img_base64 = base64.b64encode(buffer).decode()
+            
+            # Call external OCR service
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    "http://localhost:8081/ocr",
+                    json={"image_base64": img_base64, "lang": lang},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        return {"error": f"OCR service error: {resp.status}"}
+                    
+                    ocr_data = await resp.json()
+                    ocr_results = ocr_data['result']
+            
             # Handle OCR result format - CONVERT NEW FORMAT TO OLD FORMAT
             if ocr_results and len(ocr_results) > 0:
                 # Check if we got the new OCRResult object
@@ -934,9 +1043,13 @@ async def analyze_plate(request: PlateAnalysisRequest):
         # Analyze the plate with async implementation
         result = await analyzer.analyze_plate_from_base64_async(base64_data)
         
-        # Return result
+        # Return result - handle errors properly
         if result.get("error"):
-            raise HTTPException(status_code=500, detail=result)
+            # Return error as JSON, not HTTPException with dict
+            raise HTTPException(
+                status_code=500, 
+                detail=result.get("error")  # ← Changed: Just the string, not the dict
+            )
         else:
             return PlateAnalysisResponse(**result)
             
@@ -944,12 +1057,10 @@ async def analyze_plate(request: PlateAnalysisRequest):
         raise
     except Exception as e:
         logger.error(f"Analysis endpoint failed: {e}")
+        logger.error(traceback.format_exc())  # ← Log the traceback
         raise HTTPException(
             status_code=500, 
-            detail={
-                "error": str(e),
-                "traceback": traceback.format_exc()
-            }
+            detail=str(e)  # ← Changed: Just the string
         )
 
 @app.get("/models/info")
@@ -999,19 +1110,60 @@ async def ollama_status():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+# @app.get("/health", response_model=HealthResponse)
+# async def health_check():
+#     """Health check endpoint"""
+#     return HealthResponse(
+#         status="healthy",
+#         ocr_models_loaded={
+#             "english": analyzer.ocr_model_en is not None,
+#             "arabic": analyzer.ocr_model_ar is not None
+#         },
+#         ollama_available=analyzer.ollama_available,
+#         ollama_model=analyzer.ollama_model,
+#         timestamp=time.time()
+#     )
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
+    # Check OCR service health
+    ocr_service_healthy = False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{analyzer.ocr_service_url}/health", timeout=5) as resp:
+                ocr_service_healthy = resp.status == 200
+    except:
+        pass
+    
     return HealthResponse(
         status="healthy",
         ocr_models_loaded={
-            "english": analyzer.ocr_model_en is not None,
-            "arabic": analyzer.ocr_model_ar is not None
+            "english": ocr_service_healthy,
+            "arabic": ocr_service_healthy
         },
         ollama_available=analyzer.ollama_available,
         ollama_model=analyzer.ollama_model,
         timestamp=time.time()
     )
+
+@app.get("/queue/stats")
+async def queue_statistics():
+    """Get queue statistics"""
+    async with analyzer.stats_lock:
+        avg_wait = (sum(analyzer.queue_stats['wait_times']) / 
+                   len(analyzer.queue_stats['wait_times']) 
+                   if analyzer.queue_stats['wait_times'] else 0.0)
+        
+        return {
+            'queue_size': analyzer.request_queue.qsize(),
+            'max_queue_size': analyzer.request_queue.maxsize,
+            'total_processed': analyzer.queue_stats['total_processed'],
+            'total_rejected': analyzer.queue_stats['total_rejected'],
+            'average_wait_time': round(avg_wait, 2),
+            'current_processing': analyzer.queue_stats['current_processing'],
+            'ollama_semaphore_available': analyzer.ollama_semaphore._value
+        }
 
 if __name__ == '__main__':
     # Configuration for FastAPI with uvicorn
@@ -1029,7 +1181,8 @@ if __name__ == '__main__':
         "ocr_fastapi_server:app",
         host=host,
         port=port,
-        workers=workers,
-        # loop="uvloop",  # High-performance event loop
+        workers=1,  # CRITICAL: MUST BE 1
+        timeout_keep_alive=300,
+        limit_concurrency=10,  # Limit total concurrent connections
         access_log=True
     )

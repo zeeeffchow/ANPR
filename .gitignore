@@ -29,6 +29,7 @@ new_venv/
 test-venv/
 newestvenv/
 paddleocr2_env/
+latest_venv/
 
 # discard folder
 /discard
