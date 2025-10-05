@@ -54,12 +54,14 @@ async def perform_ocr(request: OCRRequest):
                 rec_texts = ocr_result_obj['rec_texts']
                 rec_scores = ocr_result_obj['rec_scores']
                 rec_polys = ocr_result_obj['rec_polys']
-                
+
                 for text, score, poly in zip(rec_texts, rec_scores, rec_polys):
+                    text_str = str(text) if not isinstance(text, str) else text
                     serializable_result.append([
                         poly.tolist() if hasattr(poly, 'tolist') else poly,
-                        (text, float(score))
+                        (text_str, float(score))
                     ])
+                
             else:
                 serializable_result = result
         

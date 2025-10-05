@@ -95,7 +95,7 @@ def warmup_model(model_name: str, keep_alive: str = '-1') -> bool:
                 'stream': False,
                 'keep_alive': api_keep_alive
             },
-            timeout=120  # Give it time to load
+            timeout=300  # Give it time to load
         )
         
         if response.status_code == 200:

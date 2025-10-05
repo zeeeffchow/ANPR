@@ -180,37 +180,79 @@ class FastAPIUAEPlateAnalyzer:
         }
 
         # System prompt for Ollama Qwen2.5-VL
+#         self.qwen_system_prompt = """
+# You are an expert in UAE license plate recognition. Your task is to analyze license plate images and extract accurate information.
+
+# === UAE EMIRATE FORMATS ===
+
+# Letter-based categories (A-Z):
+# - Dubai: Letter + "DUBAI" + Number
+# - Ajman: Letter + "AJMAN" + Number  
+# - Ras Al Khaimah: Letter + "UAE.RAK" or "RAS AL KHAIMAH" + Number
+# - Fujairah: Letter + "UAE" + الفجيرة (Arabic text) + Number
+# - Umm Al Quwain: Letter + أم القيوين (Arabic text only) + Number
+
+# Number-based categories (1-50):
+# - Abu Dhabi: Number (1,4-21,50) + "Abu Dhabi" or "A.D" + Number
+# - Sharjah: Number (1-4) + "SHARJAH" + Number
+
+# === CRITICAL READING RULES ===
+
+# 1. READ ALL TEXT - Don't stop at the first word you see
+# 2. "UAE" ALONE IS INVALID - If you see "UAE", there must be additional text:
+#    - "UAE" + الفجيرة → Fujairah
+#    - "UAE.RAK" or "UAE" + "RAK" → Ras Al Khaimah
+# 3. NEVER return "UAE" as the state name
+# 4. Arabic text indicates the emirate - convert to English in your response:
+#    - الفجيرة → Fujairah
+#    - أم القيوين → Umm Al Quwain
+#    - الشارقة → Sharjah
+#    - دبي → Dubai
+#    - عجمان → Ajman
+#    - رأس الخيمة → Ras Al Khaimah
+#    - أبو ظبي → Abu Dhabi
+
+# === PLATE COLORS ===
+
+# Identify background color: white, yellow, red, blue, green, black, orange, gold
+
+# === JSON OUTPUT SCHEMA ===
+
+# Return ONLY valid JSON with these exact field names:
+# - "category": string - The category letter (A-Z) or number (1-50) you observe
+# - "state": string - The specific emirate name in English (Fujairah, Dubai, Abu Dhabi, Sharjah, Ajman, Ras Al Khaimah, Umm Al Quwain)
+# - "number": string - The plate number digits you observe
+# - "confidence": number - Your confidence score between 0.0 and 1.0
+# - "plate_color": string - The background color you observe
+
+# CRITICAL: Extract actual values from the image, not examples or placeholders. No Arabic text in the final JSON - always convert to English emirate names. No "UAE" as state value.
+# """
         self.qwen_system_prompt = """
-You are an expert in UAE license plate recognition for ALL seven emirates. Analyze this license plate image and extract information WITHOUT any pre-assumptions about which emirate it might be.
+UAE license plate OCR expert. Extract: category, state, number, confidence, plate_color as JSON.
 
-UAE Emirates and their formats:
-- Abu Dhabi: Number categories (1, 4-21, 50) + "Abu Dhabi"/"A.D" + plate number
-- Sharjah: Number categories (1-4) + "SHARJAH" + plate number  
-- Dubai: Letter categories (A-Z) + "DUBAI" + plate number
-- Ajman: Letter categories + "AJMAN" + plate number
-- Ras Al Khaimah: Letter categories + "UAE.RAK"/"RAS AL KHAIMAH" + plate number
-- Fujairah: Letter categories + Arabic text + plate number
-- Umm Al Quwain: Letter categories + Arabic text + plate number
+PLATE FORMATS:
+Dubai/Ajman/RAK/Fujairah/UAQ: Letter category + Emirate + Number
+Abu Dhabi: Number category (1,4-21,50) + "Abu Dhabi"/"A.D" + Number
+Sharjah: Number category (1-4) + "SHARJAH" + Number
 
-For Abu Dhabi and Sharjah: Apply disambiguation if you see two numbers - check if left number is in valid categories. If yes, then left number is the category.
-For others: Letter category + state name + number (no ambiguity).
+PLATE FORMAT DISAMBIGUATION: For Abu Dhabi and Sharjah plates, you will see two numbers. If the number nearer to the left/top of the plate is a valid number category specified above, then it is the category, and the number on the right/bottom of the plate is the plate number.
 
-For Fujairah and Umm Al Quwain: The Emirate is stated in Arabic. Look for Arabic text and use that to determine the Emirate. Do NOT attempt to extract any English letters as the Emirate.
+CRITICAL RULE - "UAE" text handling:
+When you see "UAE" on the plate, it's NOT the complete emirate name. You MUST look for additional text:
+- If "UAE" appears with الفجيرة (Arabic) nearby → state is "Fujairah"
+- If "UAE.RAK" or "UAE" with "RAK" → state is "Ras Al Khaimah"
+- "UAE" alone is NEVER a valid state value
+The specific emirate is always indicated by additional text beyond just "UAE".
 
-IMPORTANT: Always normalize Emirate names: Arabic text → English text, "A.D" → "Abu Dhabi", "RAK" → "Ras Al Khaimah".
+ARABIC TO ENGLISH:
+الفجيرة=Fujairah, أم القيوين=Umm Al Quwain, الشارقة=Sharjah, دبي=Dubai, عجمان=Ajman, رأس الخيمة=Ras Al Khaimah, أبو ظبي=Abu Dhabi
 
-Identify plate background color: white, yellow, red, blue, green, black, orange, gold.
-
-IMPORTANT: Return a valid JSON format using exactly these field names:
-- "category": The actual category you see (letter A-Z or number 1-50)
-- "state": The actual emirate name you identify  
-- "number": The actual plate number you see
-- "confidence": Your confidence level (0.0-1.0)
-- "plate_color": The actual background color you observe
-
-You MUST not return any Arabic text in the final JSON. Always convert it to English.
-
-CRITICAL: Extract real values from the image, not placeholder examples.
+OUTPUT: JSON containing:
+- category (a letter or a number),
+- state (specific emirate name, NEVER "UAE"),
+- number (1 to 5 digits),
+- confidence (0.0-1.0),
+- plate_color (white/yellow/red/blue/green/black/orange/gold).
 """
         # self._warm_up_models()
 
@@ -306,71 +348,133 @@ CRITICAL: Extract real values from the image, not placeholder examples.
             return {"error": "Ollama service not available"}
         
         async with self.ollama_semaphore:
+            # user_prompt = f"""
+# TASK: Extract license plate information from this image completely and accurately, and return it as JSON.
+
+# === STEPS ===
+
+# STEP 1 - Identify all visible text:
+# - Look for English text (letters, words, numbers)
+# - Look for Arabic text (script characters)
+# - Note the spatial arrangement (left to right)Step 2: Determine the category (leftmost letter or number)
+
+# STEP 2 - Determine the emirate:
+# - If you see "UAE" alone: This is incomplete - look for text next to it
+#   - "UAE" with الفجيرة nearby → Emirate is Fujairah
+#   - "UAE.RAK" or "UAE" with "RAK" → Emirate is Ras Al Khaimah
+# - If you see "DUBAI", "AJMAN", etc. → Use that emirate name
+# - If you see Arabic only (أم القيوين) → Convert to English (Umm Al Quwain)
+
+# STEP 3 - Extract components:
+# - Category: Leftmost letter or number
+# - Emirate: Use rules from Step 2 (never "UAE")
+# - Number: Rightmost digit sequence
+# - Color: Background color of plate
+
+# STEP 4 - Output JSON following the exact JSON OUTPUT SCHEMA:
+# - "category": string - The category letter (A-Z) or number (1-50) you observe
+# - "state": string - The specific emirate name in English (Fujairah, Dubai, Abu Dhabi, Sharjah, Ajman, Ras Al Khaimah, Umm Al Quwain)
+# - "number": string - The plate number digits you observe
+# - "confidence": number - Your confidence score between 0.0 and 1.0
+# - "plate_color": string - The background color you observe
+
+# === EMIRATE IDENTIFICATION ===
+
+# CRITICAL: If you see "UAE" in English:
+# - This is NOT the complete emirate name
+# - Look for additional text next to it:
+#   - Arabic text الفجيرة after "UAE" = Fujairah
+#   - ".RAK" or "RAK" after "UAE" = Ras Al Khaimah
+
+# Arabic text recognition:
+# - الفجيرة = Fujairah
+# - أم القيوين = Umm Al Quwain
+# - الشارقة = Sharjah
+# - دبي = Dubai
+# - عجمان = Ajman
+# - رأس الخيمة = Ras Al Khaimah
+# - أبو ظبي = Abu Dhabi
+
+# ==============================
+
+# ALWAYS remember: 
+# - "UAE" is not a valid emirate value. Always identify the specific emirate.
+# - Extract the ACTUAL values you see - no defaults, no examples, no "UAE" as state.
+
+# Timestamp: {time.time()}
+#         """
             user_prompt = f"""
-Analyze this image of a cropped license plate from scratch. Do NOT make any assumptions about which emirate it belongs to.
-
-Pay special attention to:
-1. All text visible on the plate (both English and Arabic script)
-2. Category indicators (single letters A-Z or numbers 1-50)
-3. State/emirate names in both Arabic and English
-4. Plate numbers (typically 1-5 digits)
-5. Background plate color
-
-Arabic Text Emirate Recognition Guide:
-- الفجيرة (al-Fujairah) = Fujairah emirate
-- أم القيوين (Umm al-Quwain) = Umm Al Quwain emirate  
-- الشارقة (al-Sharjah) = Sharjah emirate
-- دبي (Dubai) = Dubai emirate
-- عجمان (Ajman) = Ajman emirate
-- رأس الخيمة (Ras al-Khaimah) = Ras Al Khaimah emirate
-- أبو ظبي (Abu Dhabi) = Abu Dhabi emirate
-
-Extract exactly what you see in this specific image - do not default to "Dubai" or use any placeholder values.
-
-Provide your final JSON in the exact format that we have specified earlier.
-
-Timestamp: {time.time()}
-    """
-                
+Extract plate info as JSON. Read ALL text - if you see "UAE" or "U.A.E", look for text next to it (الفجيرة=Fujairah, RAK=Ras Al Khaimah). Convert all Arabic to English. 
+Return: category, state (the specific emirate, never "UAE"), number, confidence, plate_color as stated earlier.
+"""
+                    
             for attempt in range(max_retries):
                 try:
-                    logger.info(f"Ollama Qwen2.5-VL async attempt {attempt + 1}/{max_retries}")
+                    logger.info(f"┌─── Ollama Qwen2.5-VL Analysis (Attempt {attempt + 1}/{max_retries}) ───┐")
                     
                     payload = {
                         "model": self.ollama_model,
                         "prompt": self.qwen_system_prompt + "\n\n" + user_prompt,
                         "images": [image_base64],
                         "stream": False,
+                        "format": "json",
                         "options": {
                             "temperature": 0,
                             "top_p": 0.9
                         }
                     }
                     
+                    logger.info(f"│ Sending request to Ollama...")
+                    logger.debug(f"│ Image base64 length: {len(image_base64)} characters")
+                    
                     # Use asyncio to make HTTP request non-blocking                    
                     async with aiohttp.ClientSession() as session:
                         async with session.post(
                             f"{self.ollama_url}/api/generate",
                             json=payload,
-                            timeout=aiohttp.ClientTimeout(total=120)
+                            timeout=aiohttp.ClientTimeout(total=300)
                         ) as response:
                             
-                            logger.info(f"Ollama response status: {response.status}")
+                            logger.info(f"│ Ollama HTTP Status: {response.status}")
                             
                             if response.status == 200:
                                 result = await response.json()
                                 generated_text = result.get("response", "")
                                 
-                                logger.info(f"Ollama generated text: {generated_text[:200]}...")
+                                logger.info(f"│ ✓ Ollama Response Received")
+                                logger.info(f"│ Raw Response Length: {len(generated_text)} chars")
+                                logger.info(f"│")
+                                logger.info(f"│ ─── FULL QWEN RESPONSE ───")
+                                logger.info(f"│ {generated_text}")
+                                logger.info(f"│ ─── END QWEN RESPONSE ───")
+                                logger.info(f"│")
                                 
                                 # Parse JSON from response
                                 json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', generated_text, re.DOTALL)
                                 if json_match:
                                     try:
-                                        parsed_result = json.loads(json_match.group())
+                                        json_str = json_match.group()
+                                        logger.info(f"│ Extracted JSON: {json_str}")
+                                        
+                                        parsed_result = json.loads(json_str)
+                                        
+                                        logger.info(f"│")
+                                        logger.info(f"│ ─── QWEN EXTRACTED DATA ───")
+                                        logger.info(f"│ Category:     '{parsed_result.get('category', 'N/A')}'")
+                                        logger.info(f"│ State:        '{parsed_result.get('state', 'N/A')}'")
+                                        logger.info(f"│ Number:       '{parsed_result.get('number', 'N/A')}'")
+                                        logger.info(f"│ Confidence:   {parsed_result.get('confidence', 'N/A')}")
+                                        logger.info(f"│ Plate Color:  '{parsed_result.get('plate_color', 'N/A')}'")
+                                        logger.info(f"│ ───────────────────────────")
+                                        logger.info(f"│")
 
                                         emirate_full_name = parsed_result.get("state", "")
                                         state_code = self.map_emirate_to_code(emirate_full_name)
+                                        
+                                        logger.info(f"│ Emirate Mapping:")
+                                        logger.info(f"│   Input:  '{emirate_full_name}'")
+                                        logger.info(f"│   Output: '{state_code}'")
+                                        
                                         normalized_result = {
                                             "category": parsed_result.get("category", ""),
                                             "state": state_code,
@@ -380,37 +484,59 @@ Timestamp: {time.time()}
                                             "method": "ollama_qwen2.5vl_async",
                                             "vehicle_type": self.get_vehicle_type(parsed_result.get("plate_color", "white").lower())
                                         }
-                                                                                                                
+                                        
                                         # Generate full_text if we have components
                                         if normalized_result["category"] and normalized_result["state"] and normalized_result["number"]:
                                             normalized_result["full_text"] = self.generate_full_text(
                                                 normalized_result["category"], normalized_result["state"], normalized_result["number"]
                                             )
                                         
+                                        logger.info(f"│")
+                                        logger.info(f"│ ─── FINAL NORMALIZED RESULT ───")
+                                        logger.info(f"│ Category:     '{normalized_result['category']}'")
+                                        logger.info(f"│ State:        '{normalized_result['state']}'")
+                                        logger.info(f"│ Number:       '{normalized_result['number']}'")
+                                        logger.info(f"│ Full Text:    '{normalized_result.get('full_text', 'N/A')}'")
+                                        logger.info(f"│ Confidence:   {normalized_result['confidence']}")
+                                        logger.info(f"│ Plate Color:  '{normalized_result['plate_color']}'")
+                                        logger.info(f"│ Vehicle Type: '{normalized_result['vehicle_type']}'")
+                                        logger.info(f"│ Method:       '{normalized_result['method']}'")
+                                        logger.info(f"└───────────────────────────────────────────────────┘")
+                                        
                                         return normalized_result
                                         
                                     except json.JSONDecodeError as e:
-                                        logger.error(f"JSON decode error: {e}")
+                                        logger.error(f"│ ✗ JSON Decode Error: {e}")
+                                        logger.error(f"│ Failed to parse: {json_str[:200]}")
+                                        logger.info(f"└───────────────────────────────────────────────────┘")
                                         return {"error": f"Invalid JSON in Ollama response: {e}", "raw_response": generated_text}
                                 else:
-                                    logger.error("No JSON found in Ollama response")
+                                    logger.error(f"│ ✗ No JSON found in Ollama response")
+                                    logger.error(f"│ Response was: {generated_text[:500]}")
+                                    logger.info(f"└───────────────────────────────────────────────────┘")
                                     return {"error": "No JSON found in Ollama response", "raw_response": generated_text}
                             
                             else:
                                 error_text = await response.text()
-                                logger.error(f"Ollama request failed: {response.status} - {error_text[:500]}")
+                                logger.error(f"│ ✗ Ollama HTTP Error: {response.status}")
+                                logger.error(f"│ Error details: {error_text[:500]}")
+                                logger.info(f"└───────────────────────────────────────────────────┘")
                                 return {"error": f"Ollama request failed: {response.status} - {error_text[:500]}"}
                         
                 except asyncio.TimeoutError:
-                    logger.warning(f"Ollama timeout on attempt {attempt + 1}/{max_retries}")
+                    logger.warning(f"│ ⏱ Timeout on attempt {attempt + 1}/{max_retries}")
+                    logger.info(f"└───────────────────────────────────────────────────┘")
                     if attempt == max_retries - 1:
                         return {"error": "Ollama timeout after multiple attempts"}
-                    await asyncio.sleep(5)  # Non-blocking sleep
+                    await asyncio.sleep(5)
                     continue
                 except Exception as e:
-                    logger.error(f"Ollama call exception: {e}")
+                    logger.error(f"│ ✗ Exception: {e}")
+                    logger.error(f"│ Traceback: {traceback.format_exc()}")
+                    logger.info(f"└───────────────────────────────────────────────────┘")
                     return {"error": str(e)}
             
+            logger.info(f"└───────────────────────────────────────────────────┘")
             return {"error": "Max retries exceeded"}
 
     def detect_plate_color(self, image: np.ndarray) -> Tuple[str, float]:
@@ -770,37 +896,13 @@ Timestamp: {time.time()}
                         return {"error": f"OCR service error: {resp.status}"}
                     
                     ocr_data = await resp.json()
-                    ocr_results = ocr_data['result']
+                    ocr_results = ocr_data['result'][0] if ocr_data['result'] else []  # Unwrap the outer list
             
-            # Handle OCR result format - CONVERT NEW FORMAT TO OLD FORMAT
+           
             if ocr_results and len(ocr_results) > 0:
-                # Check if we got the new OCRResult object
-                ocr_result_obj = ocr_results[0]
-                
-                # Try to access data - OCRResult objects behave like dictionaries
-                try:
-                    rec_texts = ocr_result_obj['rec_texts']
-                    rec_scores = ocr_result_obj['rec_scores']
-                    rec_polys = ocr_result_obj['rec_polys']
-                    
-                    logger.debug(f"Converting new OCR format - found {len(rec_texts)} text detections")
-                    
-                    formatted_results = []
-                    for i, (text, score, poly) in enumerate(zip(rec_texts, rec_scores, rec_polys)):
-                        if text.strip():  # Skip empty strings
-                            formatted_results.append([poly.tolist(), (text, score)])
-                    
-                    ocr_results = formatted_results
-                    
-                except (KeyError, TypeError):
-                    # Not the new format, check if it's old format
-                    if isinstance(ocr_results[0], list):
-                        # Handle old format - extract from the list
-                        ocr_results = ocr_results[0]
-                        logger.debug(f"Using old format - extracted list with {len(ocr_results)} detections")
-                    else:
-                        logger.error(f"Could not access OCR data from {type(ocr_results[0])}")
-                        return {"error": f"Could not access OCR data from {type(ocr_results[0])}"}
+                # OCR service returns: [[bbox, (text, score)], ...]
+                # Already in the correct format, just log it
+                logger.debug(f"Total async raw detections: {len(ocr_results)}")
             else:
                 return {"error": "No text detected by async OCR"}
             
@@ -953,12 +1055,14 @@ Timestamp: {time.time()}
             bbox = line[0]
             text_info = line[1]
             
-            if isinstance(text_info, tuple):
-                text, confidence = text_info
+            # Extract text and confidence properly
+            if isinstance(text_info, (tuple, list)) and len(text_info) >= 2:
+                text = str(text_info[0])  # Get just the text part
+                confidence = float(text_info[1])  # Get just the confidence part
             else:
-                text = text_info
+                text = str(text_info)
                 confidence = 0.8
-            
+
             text_clean = text.strip().lower()
             
             # Skip if confidence too low
@@ -978,6 +1082,7 @@ Timestamp: {time.time()}
             if len(text.strip()) < 1:
                 continue
                 
+            # Append only the text string, not the whole tuple
             valid_detections.append((text.strip(), confidence, bbox))
         
         return valid_detections

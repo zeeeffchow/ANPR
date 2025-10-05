@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class FastAPIOCRClient:
-    def __init__(self, api_base_url: str = None, timeout: int = 120, max_retries: int = 3):
+    def __init__(self, api_base_url: str = None, timeout: int = 300, max_retries: int = 3):
         """Initialize FastAPI OCR client"""
         self.api_base_url = api_base_url or os.getenv('OCR_API_URL', 'http://localhost:8080')
         self.timeout = timeout
