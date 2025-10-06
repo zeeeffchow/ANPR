@@ -1171,14 +1171,19 @@ async def analyze_plate(request: PlateAnalysisRequest):
 @app.get("/models/info")
 async def model_info():
     """Get information about loaded models"""
+    # Check OCR service availability
+    ocr_service_healthy = False
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{analyzer.ocr_service_url}/health", timeout=5) as resp:
+                ocr_service_healthy = resp.status == 200
+    except:
+        pass
+    
     return {
-        "paddleocr_english": {
-            "loaded": analyzer.ocr_model_en is not None,
-            # "model_path": analyzer.model_path
-        },
-        "paddleocr_arabic": {
-            "loaded": analyzer.ocr_model_ar is not None,
-            # "model_path": analyzer.model_path
+        "ocr_service": {
+            "url": analyzer.ocr_service_url,
+            "available": ocr_service_healthy
         },
         "ollama": {
             "available": analyzer.ollama_available,
