@@ -8,9 +8,9 @@ requirements/
 dependency_analyzer.py
 
 # output and decoded_images
-output/
-decoded_images/
-reference/
+/output
+/decoded_images
+/reference
 
 # Python
 pycache/
