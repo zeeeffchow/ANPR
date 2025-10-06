@@ -99,6 +99,15 @@ class FastAPIOCRClient:
                     error_data = response.json() if response.content else {"error": "Validation error"}
                     logger.error(f"FastAPI validation error: {error_data}")
                     return {"error": f"FastAPI validation error", "details": error_data}
+                elif response.status_code == 503:
+                    # Queue full - retry with backoff
+                    logger.warning(f"Server busy (503) on attempt {attempt + 1}/{self.max_retries}")
+                    if attempt == self.max_retries - 1:
+                        return {"error": f"Server busy after {self.max_retries} attempts"}
+                    retry_delay = [30, 60, 120][attempt] if attempt < 3 else 120
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    continue
                 elif response.status_code == 500:
                     # Server error - might be worth retrying
                     error_data = response.json() if response.content else {"error": "Server error"}
@@ -180,6 +189,15 @@ class FastAPIOCRClient:
                             error_data = await response.json() if response.content_length else {"error": "Validation error"}
                             logger.error(f"FastAPI validation error: {error_data}")
                             return {"error": f"FastAPI validation error", "details": error_data}
+                        elif response.status == 503:  # ← ADD THIS BLOCK
+                            # Queue full - retry with backoff
+                            logger.warning(f"Server busy (503) on attempt {attempt + 1}/{self.max_retries}")
+                            if attempt == self.max_retries - 1:
+                                return {"error": f"Server busy after {self.max_retries} attempts"}
+                            retry_delay = [30, 60, 120][attempt] if attempt < 3 else 120
+                            logger.info(f"Retrying in {retry_delay} seconds...")
+                            await asyncio.sleep(retry_delay)
+                            continue
                         elif response.status == 500:
                             # Server error - might be worth retrying
                             error_data = await response.json() if response.content_length else {"error": "Server error"}

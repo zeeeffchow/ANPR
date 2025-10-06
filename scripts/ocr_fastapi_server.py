@@ -112,11 +112,11 @@ class FastAPIUAEPlateAnalyzer:
         # OCR service URL
         self.ocr_service_url = os.getenv("OCR_SERVICE_URL", "http://localhost:8081")
 
-        # Semaphore for Ollama rate limiting (max 2 concurrent)
-        self.ollama_semaphore = asyncio.Semaphore(2)
+        # Semaphore for Ollama rate limiting (max 4 concurrent)
+        self.ollama_semaphore = asyncio.Semaphore(4)
 
-        # Request queue (max 5 waiting)
-        self.request_queue = asyncio.Queue(maxsize=5)
+        # Request queue (max 10 waiting)
+        self.request_queue = asyncio.Queue(maxsize=10)
 
         # Queue statistics
         self.queue_stats = {
