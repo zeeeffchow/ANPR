@@ -90,24 +90,8 @@ class FastAPIUAEPlateAnalyzer:
     def __init__(self, ollama_url: str = "http://localhost:11434"):
         """Initialize with async-friendly PaddleOCR models and Ollama for Qwen2.5-VL"""
 
-        PADDLEOCR_HOME = "C:/Users/User/.paddlex"
-        os.environ['PADDLEOCR_HOME'] = PADDLEOCR_HOME
-        os.environ['HUB_HOME'] = PADDLEOCR_HOME
-
-        # self.model_path = model_path
         self.ollama_url = ollama_url
         self.ollama_model = "qwen2.5vl:7b"
-        # self.ocr_model_en = None
-        # self.ocr_model_ar = None
-
-        # self.ocr_en_lock = asyncio.Lock()
-        # self.ocr_ar_lock = asyncio.Lock()
-
-        # from concurrent.futures import ThreadPoolExecutor
-        # self.ocr_en_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr_en")
-        # self.ocr_ar_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr_ar")
-
-        # self.ocr_en_lock, self.ocr_ar_lock = get_ocr_locks()
 
         # OCR service URL
         self.ocr_service_url = os.getenv("OCR_SERVICE_URL", "http://localhost:8081")
@@ -127,8 +111,6 @@ class FastAPIUAEPlateAnalyzer:
         }
         self.stats_lock = asyncio.Lock()
         
-        # Initialize models in a thread-safe way
-        # self._load_ocr_models()
         self._check_ollama_connection()
         
         # Emirates mapping for normalization
@@ -179,54 +161,6 @@ class FastAPIUAEPlateAnalyzer:
             'custom': 'VIP / Personalized'
         }
 
-        # System prompt for Ollama Qwen2.5-VL
-#         self.qwen_system_prompt = """
-# You are an expert in UAE license plate recognition. Your task is to analyze license plate images and extract accurate information.
-
-# === UAE EMIRATE FORMATS ===
-
-# Letter-based categories (A-Z):
-# - Dubai: Letter + "DUBAI" + Number
-# - Ajman: Letter + "AJMAN" + Number  
-# - Ras Al Khaimah: Letter + "UAE.RAK" or "RAS AL KHAIMAH" + Number
-# - Fujairah: Letter + "UAE" + الفجيرة (Arabic text) + Number
-# - Umm Al Quwain: Letter + أم القيوين (Arabic text only) + Number
-
-# Number-based categories (1-50):
-# - Abu Dhabi: Number (1,4-21,50) + "Abu Dhabi" or "A.D" + Number
-# - Sharjah: Number (1-4) + "SHARJAH" + Number
-
-# === CRITICAL READING RULES ===
-
-# 1. READ ALL TEXT - Don't stop at the first word you see
-# 2. "UAE" ALONE IS INVALID - If you see "UAE", there must be additional text:
-#    - "UAE" + الفجيرة → Fujairah
-#    - "UAE.RAK" or "UAE" + "RAK" → Ras Al Khaimah
-# 3. NEVER return "UAE" as the state name
-# 4. Arabic text indicates the emirate - convert to English in your response:
-#    - الفجيرة → Fujairah
-#    - أم القيوين → Umm Al Quwain
-#    - الشارقة → Sharjah
-#    - دبي → Dubai
-#    - عجمان → Ajman
-#    - رأس الخيمة → Ras Al Khaimah
-#    - أبو ظبي → Abu Dhabi
-
-# === PLATE COLORS ===
-
-# Identify background color: white, yellow, red, blue, green, black, orange, gold
-
-# === JSON OUTPUT SCHEMA ===
-
-# Return ONLY valid JSON with these exact field names:
-# - "category": string - The category letter (A-Z) or number (1-50) you observe
-# - "state": string - The specific emirate name in English (Fujairah, Dubai, Abu Dhabi, Sharjah, Ajman, Ras Al Khaimah, Umm Al Quwain)
-# - "number": string - The plate number digits you observe
-# - "confidence": number - Your confidence score between 0.0 and 1.0
-# - "plate_color": string - The background color you observe
-
-# CRITICAL: Extract actual values from the image, not examples or placeholders. No Arabic text in the final JSON - always convert to English emirate names. No "UAE" as state value.
-# """
         self.qwen_system_prompt = """
 UAE license plate OCR expert. Extract: category, state, number, confidence, plate_color as JSON.
 
@@ -244,81 +178,24 @@ When you see "UAE" on the plate, it's NOT the complete emirate name. You MUST lo
 - "UAE" alone is NEVER a valid state value
 The specific emirate is always indicated by additional text beyond just "UAE".
 
+EMIRATE IDENTIFICATION:
+- ALWAYS attempt to read the emirate text, even if image quality is poor
+- Return your best reading of the emirate name based on what you can see
+- If you cannot read ANY emirate text at all → default to "Abu Dhabi"
+
 ARABIC TO ENGLISH:
 الفجيرة=Fujairah, أم القيوين=Umm Al Quwain, الشارقة=Sharjah, دبي=Dubai, عجمان=Ajman, رأس الخيمة=Ras Al Khaimah, أبو ظبي=Abu Dhabi
 
+VALID STATE VALUES:
+Abu Dhabi, Dubai, Sharjah, Ajman, Umm Al Quwain, Ras Al Khaimah, Fujairah
+
 OUTPUT: JSON containing:
 - category (a letter or a number),
-- state (specific emirate name, NEVER "UAE"),
+- state (specific emirate name, default to "Abu Dhabi" if no text visible, NEVER "UAE"),
 - number (1 to 5 digits),
 - confidence (0.0-1.0),
 - plate_color (white/yellow/red/blue/green/black/orange/gold).
 """
-        # self._warm_up_models()
-
-    def _warm_up_models(self):
-        """Pre-warm OCR models to avoid first-request delays"""
-        try:
-            if self.ocr_model_en is not None:
-                logger.info("Warming up English OCR model...")
-                # Create small dummy image
-                dummy_image = np.zeros((50, 200, 3), dtype=np.uint8)
-                dummy_image.fill(255)  # White background
-                self.ocr_model_en.predict(dummy_image)
-                logger.info("English OCR model warmed up")
-                
-            if self.ocr_model_ar is not None:
-                logger.info("Warming up Arabic OCR model...")
-                dummy_image = np.zeros((50, 200, 3), dtype=np.uint8) 
-                dummy_image.fill(255)
-                self.ocr_model_ar.predict(dummy_image)
-                logger.info("Arabic OCR model warmed up")
-                
-        except Exception as e:
-            logger.warning(f"Model warm-up failed: {e}")
-
-    def _load_ocr_models(self):
-        """Load PaddleOCR models using config files for offline operation"""
-        try:
-            from paddleocr import PaddleOCR
-            import os
-            
-            # Get the directory where this script is located
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            # Paths to config files (should be in same directory as this script)
-            en_config_path = os.path.join(script_dir, "ocr_en_config.yaml")
-            ar_config_path = os.path.join(script_dir, "ocr_ar_config.yaml")
-            
-            # Check if config files exist
-            if not os.path.exists(en_config_path):
-                raise FileNotFoundError(f"English config not found: {en_config_path}")
-            if not os.path.exists(ar_config_path):
-                raise FileNotFoundError(f"Arabic config not found: {ar_config_path}")
-            
-            logger.info(f"Loading English OCR model from config: {en_config_path}")
-            
-            # Load English model from config file
-            self.ocr_model_en = PaddleOCR(paddlex_config=en_config_path)
-            logger.info("PaddleOCR English model loaded successfully")
-            
-            logger.info(f"Loading Arabic OCR model from config: {ar_config_path}")
-            
-            # Load Arabic model from config file
-            self.ocr_model_ar = PaddleOCR(paddlex_config=ar_config_path)
-            logger.info("PaddleOCR Arabic model loaded successfully")
-            
-        except FileNotFoundError as e:
-            logger.error(f"Config file missing: {e}")
-            logger.error("Make sure ocr_en_config.yaml and ocr_ar_config.yaml are in the same directory")
-            self.ocr_model_en = None
-            self.ocr_model_ar = None
-        except Exception as e:
-            logger.error(f"Failed to load OCR models: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            self.ocr_model_en = None
-            self.ocr_model_ar = None
 
     def _check_ollama_connection(self):
         """Check if Ollama is running and has the required model"""
@@ -348,66 +225,15 @@ OUTPUT: JSON containing:
             return {"error": "Ollama service not available"}
         
         async with self.ollama_semaphore:
-            # user_prompt = f"""
-# TASK: Extract license plate information from this image completely and accurately, and return it as JSON.
-
-# === STEPS ===
-
-# STEP 1 - Identify all visible text:
-# - Look for English text (letters, words, numbers)
-# - Look for Arabic text (script characters)
-# - Note the spatial arrangement (left to right)Step 2: Determine the category (leftmost letter or number)
-
-# STEP 2 - Determine the emirate:
-# - If you see "UAE" alone: This is incomplete - look for text next to it
-#   - "UAE" with الفجيرة nearby → Emirate is Fujairah
-#   - "UAE.RAK" or "UAE" with "RAK" → Emirate is Ras Al Khaimah
-# - If you see "DUBAI", "AJMAN", etc. → Use that emirate name
-# - If you see Arabic only (أم القيوين) → Convert to English (Umm Al Quwain)
-
-# STEP 3 - Extract components:
-# - Category: Leftmost letter or number
-# - Emirate: Use rules from Step 2 (never "UAE")
-# - Number: Rightmost digit sequence
-# - Color: Background color of plate
-
-# STEP 4 - Output JSON following the exact JSON OUTPUT SCHEMA:
-# - "category": string - The category letter (A-Z) or number (1-50) you observe
-# - "state": string - The specific emirate name in English (Fujairah, Dubai, Abu Dhabi, Sharjah, Ajman, Ras Al Khaimah, Umm Al Quwain)
-# - "number": string - The plate number digits you observe
-# - "confidence": number - Your confidence score between 0.0 and 1.0
-# - "plate_color": string - The background color you observe
-
-# === EMIRATE IDENTIFICATION ===
-
-# CRITICAL: If you see "UAE" in English:
-# - This is NOT the complete emirate name
-# - Look for additional text next to it:
-#   - Arabic text الفجيرة after "UAE" = Fujairah
-#   - ".RAK" or "RAK" after "UAE" = Ras Al Khaimah
-
-# Arabic text recognition:
-# - الفجيرة = Fujairah
-# - أم القيوين = Umm Al Quwain
-# - الشارقة = Sharjah
-# - دبي = Dubai
-# - عجمان = Ajman
-# - رأس الخيمة = Ras Al Khaimah
-# - أبو ظبي = Abu Dhabi
-
-# ==============================
-
-# ALWAYS remember: 
-# - "UAE" is not a valid emirate value. Always identify the specific emirate.
-# - Extract the ACTUAL values you see - no defaults, no examples, no "UAE" as state.
-
-# Timestamp: {time.time()}
-#         """
             user_prompt = f"""
-Extract plate info as JSON. Read ALL text - if you see "UAE" or "U.A.E", look for text next to it (الفجيرة=Fujairah, RAK=Ras Al Khaimah). Convert all Arabic to English. 
-Return: category, state (the specific emirate, never "UAE"), number, confidence, plate_color as stated earlier.
-"""
-                    
+Extract plate info as JSON. Read ALL text carefully:
+- If you see "UAE" or "U.A.E", look for text next to it (الفجيرة=Fujairah, RAK=Ras Al Khaimah)
+- Convert all Arabic to English
+- ALWAYS attempt to read the emirate text - return your best reading
+- Only default to "Abu Dhabi" if you cannot see any emirate text at all
+
+Return: category, state (specific emirate OR "Abu Dhabi" if no text visible, never "UAE"), number, confidence, plate_color in the JSON format stated earlier.
+"""  
             for attempt in range(max_retries):
                 try:
                     logger.info(f"┌─── Ollama Qwen2.5-VL Analysis (Attempt {attempt + 1}/{max_retries}) ───┐")
@@ -470,6 +296,12 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
 
                                         emirate_full_name = parsed_result.get("state", "")
                                         state_code = self.map_emirate_to_code(emirate_full_name)
+
+                                        confidence = parsed_result.get("confidence", 1.0)
+                                        if confidence < 0.6 and state_code != "AUH":
+                                            logger.info(f"│ Low confidence ({confidence:.2f}) detected - overriding state to Abu Dhabi")
+                                            state_code = "AUH"
+                                            emirate_full_name = "Abu Dhabi"
                                         
                                         logger.info(f"│ Emirate Mapping:")
                                         logger.info(f"│   Input:  '{emirate_full_name}'")
@@ -643,39 +475,6 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
         return self.vehicle_type_mapping.get(plate_color, 'Unknown Vehicle Type')
 
     async def detect_emirate_async(self, image: np.ndarray) -> Tuple[str, float]:
-        # """Async emirate detection using PaddleOCR models"""
-        # try:
-        #     logger.info(f"Starting async emirate detection")
-            
-        #     # Try English model only
-        #     emirate_en, conf_en = "unknown", 0.0
-        #     if self.ocr_model_en is not None:
-        #         try:
-        #             logger.info(f"Running English OCR predict async...")
-                    
-        #             # Run OCR in thread pool to avoid blocking the event loop
-        #             loop = asyncio.get_event_loop()
-        #             ocr_results_en = await loop.run_in_executor(
-        #                 None, self.ocr_model_en.predict, image
-        #             )
-                    
-        #             logger.info(f"English OCR predict completed")
-        #             emirate_en, conf_en = self.parse_emirate_results(ocr_results_en, "en")
-        #             logger.info(f"English OCR detected: {emirate_en} (conf: {conf_en:.2f})")
-        #         except Exception as e:
-        #             logger.error(f"English OCR failed: {e}")
-            
-        #     # Return English result if found, otherwise unknown
-        #     if emirate_en != "unknown" and conf_en > 0.6:
-        #         logger.info(f"Using English OCR result: {emirate_en}")
-        #         return emirate_en, conf_en
-        #     else:
-        #         logger.info("English OCR failed to detect emirate")
-        #         return "unknown", 0.0
-                
-        # except Exception as e:
-        #     logger.error(f"Async emirate detection failed: {e}")
-        #     return "unknown", 0.0
         """Async emirate detection using external OCR service"""
         try:
             logger.info("Starting emirate detection via OCR service")
@@ -852,7 +651,7 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
                     logger.info("*** DEBUG: Traditional OCR succeeded, using its result")
                 
             else:
-                # Low confidence or unknown emirate - let Ollama do fresh analysis
+                # Low confidence or Abu Dhabi - let Ollama do fresh analysis
                 logger.info(f"Using Ollama Qwen2.5-VL for fresh analysis (emirate: {emirate}, confidence: {emirate_confidence:.2f})")
                 result = await self.call_ollama_qwen_async(base64_data)
                 
@@ -916,7 +715,7 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
                 return {
                     "error": "No valid text found after filtering",
                     "raw_detections_count": len(ocr_results),
-                    "emirate": emirate or "Unknown"
+                    "emirate": emirate or "Abu Dhabi"
                 }
             
             # Process each detection and split combined text if needed
@@ -946,10 +745,10 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
             
             # Extract components
             category = None
-            state = emirate or "Unknown"
+            state = emirate or "Abu Dhabi"
             number = None
             
-            logger.debug(f"Extracting components for emirate: {emirate or 'Unknown'}")
+            logger.debug(f"Extracting components for emirate: {emirate or 'Abu Dhabi'}")
             
             for detection in processed_detections:
                 text = detection['text']
@@ -983,10 +782,10 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
                         # Unknown emirate - try to extract any reasonable category
                         if len(text) == 1 and text.isalpha():
                             category = text.upper()
-                            logger.debug(f"Found letter category: '{category}' (emirate unknown)")
+                            logger.debug(f"Found letter category: '{category}' (emirate defaulting to Abu Dhabi)")
                         elif text.isdigit() and len(text) <= 2:
                             category = text
-                            logger.debug(f"Found number category: '{category}' (emirate unknown)")
+                            logger.debug(f"Found number category: '{category}' (emirate defaulting to Abu Dhabi)")
                 
                 # Extract plate number (1-5 digits)
                 if text.isdigit() and 1 <= len(text) <= 5 and number is None:
@@ -1026,18 +825,18 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
                 # Detailed error reporting
                 all_texts = [d['text'] for d in processed_detections]
                 return {
-                    "error": f"Incomplete async extraction for {emirate or 'Unknown emirate'}",
+                    "error": f"Incomplete async extraction for {emirate or 'Abu Dhabi'}",
                     "details": {
                         "category_found": category,
                         "number_found": number,
                         "all_detected_texts": all_texts,
-                        "valid_categories_for_emirate": self.valid_categories.get(emirate, "N/A") if emirate else "Unknown emirate",
-                        "emirate": emirate or "Unknown"
+                        "valid_categories_for_emirate": self.valid_categories.get(emirate, "N/A") if emirate else "Abu Dhabi",
+                        "emirate": emirate or "Abu Dhabi"
                     }
                 }
         except Exception as e:
             logger.error(f"Async traditional OCR extraction failed: {e}")
-            return {"error": str(e), "traceback": traceback.format_exc(), "emirate": emirate or "Unknown"}
+            return {"error": str(e), "traceback": traceback.format_exc(), "emirate": emirate or "Abu Dhabi"}
         
     def filter_arabic_and_noise(self, ocr_results: List) -> List:
         """Filter out Arabic text, low-confidence results, and noise"""
@@ -1101,19 +900,19 @@ Return: category, state (the specific emirate, never "UAE"), number, confidence,
     def map_emirate_to_code(self, emirate_name: str) -> str:
         """
         Convert full emirate name to 3-letter code.
-        Returns 'Unknown' if emirate is not recognized.
+        Returns 'AUH' (Abu Dhabi) if emirate is not recognized.
         
         Args:
             emirate_name: Full name of emirate (e.g., 'Abu Dhabi', 'Dubai')
         
         Returns:
-            3-letter code (e.g., 'AUH', 'DXB') or 'Unknown'
+            3-letter code (e.g., 'AUH', 'DXB') or 'AUH' as default
         """
         if not emirate_name or emirate_name == "Unknown" or emirate_name == "unknown":
-            return "Unknown"
+            return "AUH"  # Changed from "Unknown" to "AUH"
         
-        # Get the code from mapping, default to 'Unknown' if not found
-        return self.emirate_to_code.get(emirate_name, "Unknown")
+        # Get the code from mapping, default to 'AUH' if not found
+        return self.emirate_to_code.get(emirate_name, "AUH")  # Changed from "Unknown" to "AUH"
 
 # Initialize the FastAPI analyzer
 analyzer = FastAPIUAEPlateAnalyzer(
